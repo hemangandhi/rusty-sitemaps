@@ -5,6 +5,8 @@ extern crate reqwest;
 extern crate select;
 extern crate serde_json;
 
+use futures::future;
+
 use log::{error, info};
 
 use std::collections::HashMap;
@@ -38,27 +40,40 @@ impl<T: Write + Copy> SitemapGenerator<T> {
         }
     }
 
-    fn parse(&mut self, links: &Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-        for link in links.iter() {
-            if !self.table.contains_key(link) {
-                let body: &str = &reqwest::blocking::get(link)?.text()?;
+    async fn parse(&mut self, links: Vec<String>) {
+        future::join_all(links.iter()
+            .filter(|link| !self.table.contains_key(link.as_str()))
+            .map(|borrow_link| async {
+                let link = Box::new(borrow_link.clone());
+                let response = match reqwest::get((*link).as_str()).await {
+                     Result::Ok(resp) => resp,
+                     Result::Err(e) => {
+                         error!("{}", e);
+                         return Option::None
+                    }
+                };
+                let body = match response.text().await {
+                     Result::Ok(body) => body,
+                     Result::Err(e) => {
+                         error!("{}", e);
+                         return Option::None
+                    }
+                };
 
-                let children: Vec<_> = Document::from(body)
+                let children: Vec<_> = Document::from(body.as_str())
                     .find(Name("a"))
                     .filter_map(|n| n.attr("href"))
                     .map(String::from)
                     .collect();
 
-                self.table.insert(String::from(link), children.clone());
-                self.parse(&children)?;
-            }
-        }
-
-        Ok(())
+                self.table.insert(String::from(*link), children.clone());
+                self.parse(children);
+                Option::Some(())
+            }).collect::<Vec<_>>());
     }
 
-    fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.parse(&vec![self.root_link.clone()])
+    async fn start(&mut self) {
+        self.parse(vec![self.root_link.clone()]).await
     }
 }
 
